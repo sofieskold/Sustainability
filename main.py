@@ -7,10 +7,10 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 import os
 
-# --- KONFIGURATION ---
+# Configuration
 st.set_page_config(page_title="ABB | Sustainability AI", page_icon="ABB", layout="wide")
 
-# ABB Brand Colors & Styling
+# ABB styling
 st.markdown("""
     <style>
     .stApp { background-color: #ffffff; }
@@ -19,104 +19,89 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- SNABBARE AI-SETUP ---
+# Setup
+# This function loads the PDF, splits it into chunks, and creates a vector store
+# @st.cache_resource means it only runs once and is cached, which keeps the app fast
 @st.cache_resource
 def get_retriever():
     if not os.path.exists("faiss_index"):
+        # Load and split the PDF into chunks
         loader = PyPDFLoader("rapport.pdf")
         documents = loader.load()
         splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
         chunks = splitter.split_documents(documents)
+        
+        # Create embeddings and save the vector store locally
         embeddings = OllamaEmbeddings(model="llama3.2")
         vectorstore = FAISS.from_documents(chunks, embeddings)
         vectorstore.save_local("faiss_index")
     else:
+        # Load the existing vector store
         embeddings = OllamaEmbeddings(model="llama3.2")
         vectorstore = FAISS.load_local("faiss_index", embeddings, allow_dangerous_deserialization=True)
+    
+    # Return a retriever that fetches the 3 most relevant chunks
     return vectorstore.as_retriever(search_kwargs={"k": 3})
 
 @st.cache_resource
 def get_llm():
     return ChatOllama(model="llama3.2", temperature=0)
 
-# --- INITIALISERING ---
+# Initialize retriever and LLM
 retriever = get_retriever()
 llm = get_llm()
 
-# --- UI ---
+# UI
 col_logo, col_title = st.columns([1, 10])
 with col_logo:
     st.image("https://upload.wikimedia.org/wikipedia/commons/0/00/ABB_logo.svg", width=80)
 with col_title:
     st.title("Corporate Sustainability AI Agent")
-    st.caption("Agentic AI Innovation for Supply Chain Risk Management")
+    st.caption("Supply Chain Risk Analysis")
 
 st.markdown("---")
 
-with st.sidebar:
-    st.header("System Status")
-    st.success("Local LLM: Llama 3.2 Active")
-    st.caption("Data Privacy: Local & Secure")
-    st.divider()
-    
-    st.markdown("**Risk Dimensions**")
-    st.info("Select focus areas for analysis:")
-    
-    # Utökade dimensioner baserat på ABB:s jobbannons
-    hr_active = st.checkbox("Human Rights", value=True, help="Analyze risks related to social impact and rights.")
-    labor_active = st.checkbox("Labor Practices", value=True, help="Focus on working conditions and fair labor.")
-    climate_active = st.checkbox("Climate Impacts", help="Identify carbon footprint and climate-related risks.")
-    wu_active = st.checkbox("Water Usage", help="Map water scarcity and usage efficiency.")
-    bio_active = st.checkbox("Biodiversity", help="Assess impact on local ecosystems and species.")
+# Query
+with st.form("query_form"):
+    query = st.text_input("Enter your query:", placeholder="e.g., What are our main exposure risks in cobalt sourcing?")
+    submitted = st.form_submit_button("Run Analysis")
 
-# --- ANALYS-LOGIK ---
-query = st.text_input("Enter your query:", placeholder="e.g., What are our main exposure risks in cobalt sourcing?")
-
-if st.button("Run Risk Analysis"):
+if submitted:
     if query:
-        # Samla alla valda dimensioner i en lista
-        active_dims = []
-        if hr_active: active_dims.append("Human Rights")
-        if labor_active: active_dims.append("Labor Practices")
-        if climate_active: active_dims.append("Climate Impacts")
-        if wu_active: active_dims.append("Water Usage")
-        if bio_active: active_dims.append("Biodiversity")
+        st.markdown(f"**Query:** {query}")
         
-        dim_string = ", ".join(active_dims) if active_dims else "General Sustainability"
-
-        # Hämta dokument
-        with st.status("Agent searching value chain data...", expanded=False):
+        # Step 1: Retrieve relevant chunks from the document
+        with st.status("Searching document...", expanded=False):
             context_docs = retriever.invoke(query)
             context_text = "\n\n".join([doc.page_content for doc in context_docs])
-        
-        # Uppdaterad prompt som styr AI:n mot valda dimensioner
+
+        # Step 2: Build the prompt with context and question
         prompt = ChatPromptTemplate.from_template("""
-        You are a Senior ABB Sustainability Expert. 
-        Focus your analysis specifically on these dimensions: {dimensions}.
-        
-        Based ONLY on the following context, provide a professional risk assessment:
+        You are a Senior ABB Sustainability Expert.
+
+        Based ONLY on the following context, provide a professional risk assessment.
+        If the context does not contain enough information to answer the question, 
+        respond with: "This information is not available in the provided document."
+        Do not use any knowledge outside of the context below.
+
         Context: {context}
-        
+
         Question: {question}
-        
+
         Format your response with clear bullet points.
         """)
-        
-        st.markdown(f"#### Agent Insights: {dim_string}")
+
+        # Step 3: Stream the response
+        st.markdown("#### Analysis")
         placeholder = st.empty()
         full_response = ""
-        
+
         chain = prompt | llm | StrOutputParser()
-        
-        # Streamad respons
-        for chunk in chain.stream({
-            "context": context_text, 
-            "question": query, 
-            "dimensions": dim_string
-        }):
+
+        for chunk in chain.stream({"context": context_text, "question": query}):
             full_response += chunk
             placeholder.info(full_response + "▌")
-        
+
         placeholder.info(full_response)
     else:
         st.warning("Please enter a query first.")
